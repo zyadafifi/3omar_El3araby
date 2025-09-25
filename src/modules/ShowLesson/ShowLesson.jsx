@@ -37,17 +37,7 @@ const isAndroid = () => {
   return /Android/i.test(navigator.userAgent);
 };
 
-const isChrome = () => {
-  return (
-    /Chrome/i.test(navigator.userAgent) && !/Edge/i.test(navigator.userAgent)
-  );
-};
-
-const isMobile = () => {
-  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-    navigator.userAgent
-  );
-};
+// Removed unused functions isChrome and isMobile
 
 // Android-compatible MediaRecorder formats (in order of preference)
 const ANDROID_AUDIO_FORMATS = [
@@ -79,6 +69,138 @@ const getAudioContextConfig = () => {
     };
   }
   return {};
+};
+
+/* ========================== AssemblyAI Integration ========================== */
+const ASSEMBLYAI_API_KEY = "bdb00961a07c4184889a80206c52b6f2";
+const ASSEMBLYAI_BASE_URL = "https://api.assemblyai.com/v2";
+
+// AssemblyAI service functions
+const assemblyAIService = {
+  // Upload audio file to AssemblyAI
+  async uploadAudio(audioBlob) {
+    try {
+      const formData = new FormData();
+      formData.append("audio", audioBlob, "recording.webm");
+
+      const response = await fetch(`${ASSEMBLYAI_BASE_URL}/upload`, {
+        method: "POST",
+        headers: {
+          authorization: ASSEMBLYAI_API_KEY,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.upload_url;
+    } catch (error) {
+      console.error("AssemblyAI upload error:", error);
+      throw error;
+    }
+  },
+
+  // Create transcription job
+  async createTranscription(audioUrl) {
+    try {
+      const response = await fetch(`${ASSEMBLYAI_BASE_URL}/transcript`, {
+        method: "POST",
+        headers: {
+          authorization: ASSEMBLYAI_API_KEY,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          audio_url: audioUrl,
+          language_code: "en",
+          punctuate: false,
+          format_text: false,
+          speech_model: "best", // Use best model for accuracy
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Transcription request failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.id;
+    } catch (error) {
+      console.error("AssemblyAI transcription error:", error);
+      throw error;
+    }
+  },
+
+  // Poll for transcription result
+  async getTranscription(transcriptId) {
+    try {
+      const response = await fetch(
+        `${ASSEMBLYAI_BASE_URL}/transcript/${transcriptId}`,
+        {
+          headers: {
+            authorization: ASSEMBLYAI_API_KEY,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Get transcription failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error("AssemblyAI get transcription error:", error);
+      throw error;
+    }
+  },
+
+  // Complete transcription process
+  async transcribeAudio(audioBlob, onProgress = null) {
+    try {
+      if (onProgress) onProgress("جاري رفع التسجيل...");
+
+      // Upload audio
+      const audioUrl = await this.uploadAudio(audioBlob);
+
+      if (onProgress) onProgress("جاري معالجة التسجيل...");
+
+      // Create transcription
+      const transcriptId = await this.createTranscription(audioUrl);
+
+      // Poll for result
+      let attempts = 0;
+      const maxAttempts = 30; // 30 seconds timeout
+
+      while (attempts < maxAttempts) {
+        const result = await this.getTranscription(transcriptId);
+
+        if (result.status === "completed") {
+          return {
+            text: result.text || "",
+            confidence: result.confidence || 0.8,
+          };
+        } else if (result.status === "error") {
+          throw new Error(`Transcription failed: ${result.error}`);
+        }
+
+        // Wait 1 second before next poll
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        attempts++;
+
+        if (onProgress) {
+          onProgress(`جاري المعالجة... (${attempts}/${maxAttempts})`);
+        }
+      }
+
+      throw new Error("Transcription timeout");
+    } catch (error) {
+      console.error("AssemblyAI transcription process error:", error);
+      throw error;
+    }
+  },
 };
 
 /* ========================== Enhanced Pronunciation System ========================== */
@@ -346,6 +468,13 @@ const RecordingModal = ({
   playAudioFile,
   playRecordedAudio,
   audioLevels,
+  // AssemblyAI props
+  useAssemblyAI = false,
+  isProcessingAssemblyAI = false,
+  assemblyAIProgress = "",
+  stopAssemblyAIRecording,
+  setUseAssemblyAI,
+  startRecording,
 }) => {
   if (!isOpen) return null;
 
@@ -614,7 +743,13 @@ const RecordingModal = ({
               </button>
 
               <button
-                onClick={isRecording ? onContinue : onStartRecording}
+                onClick={
+                  isRecording
+                    ? useAssemblyAI
+                      ? stopAssemblyAIRecording
+                      : onContinue
+                    : onStartRecording
+                }
                 className={[
                   "grid place-items-center rounded-full shadow-lg transition-all",
                   "w-[72px] h-[72px]",
@@ -622,7 +757,13 @@ const RecordingModal = ({
                     ? "bg-[var(--secondary-color)] text-white hover:bg-[var(--primary-color)]"
                     : "bg-[var(--secondary-color)] text-white hover:bg-[var(--primary-color)]",
                 ].join(" ")}
-                title={isRecording ? "Send" : "Tap to start speaking"}
+                title={
+                  isRecording
+                    ? useAssemblyAI
+                      ? "Stop Recording"
+                      : "Send"
+                    : "Tap to start speaking"
+                }
                 aria-label="Record"
               >
                 {isRecording ? (
@@ -647,6 +788,19 @@ const RecordingModal = ({
                 <Turtle size={16} />
                 Listen (slow)
               </button>
+
+              {!useAssemblyAI && (
+                <button
+                  onClick={() => {
+                    setUseAssemblyAI(true);
+                    startRecording();
+                  }}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-full text-blue-800 text-xs font-medium bg-blue-100 hover:bg-blue-200"
+                  title="Use AssemblyAI for better recognition"
+                >
+                  🤖 AssemblyAI
+                </button>
+              )}
             </div>
           )}
 
@@ -690,11 +844,29 @@ const RecordingModal = ({
               </div>
 
               <p className="text-gray-700 text-sm arabic_font font-medium">
-                🎤 جارٍ التسجيل... تحدث بوضوح
-                {isAndroid() && (
-                  <span className="text-xs text-blue-600 block mt-1">
-                    📱 محسّن للأندرويد
-                  </span>
+                {isProcessingAssemblyAI ? (
+                  <>
+                    🔄 {assemblyAIProgress}
+                    <span className="text-xs text-blue-600 block mt-1">
+                      🤖 معالجة بواسطة AssemblyAI
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    🎤 جارٍ التسجيل... تحدث بوضوح
+                    {isAndroid() && (
+                      <span className="text-xs text-blue-600 block mt-1">
+                        {useAssemblyAI
+                          ? "🤖 AssemblyAI + 📱 أندرويد"
+                          : "📱 محسّن للأندرويد"}
+                      </span>
+                    )}
+                    {!isAndroid() && useAssemblyAI && (
+                      <span className="text-xs text-blue-600 block mt-1">
+                        🤖 معالجة بواسطة AssemblyAI
+                      </span>
+                    )}
+                  </>
                 )}
               </p>
             </div>
@@ -1162,6 +1334,11 @@ export function ShowLesson() {
   const [microphonePermission, setMicrophonePermission] = useState(null);
   const [audioLevels, setAudioLevels] = useState(Array(28).fill(8));
 
+  // AssemblyAI states
+  const [isProcessingAssemblyAI, setIsProcessingAssemblyAI] = useState(false);
+  const [assemblyAIProgress, setAssemblyAIProgress] = useState("");
+  const [useAssemblyAI, setUseAssemblyAI] = useState(false); // Auto-fallback flag
+
   // audio/voice
   const [voices, setVoices] = useState([]);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -1582,6 +1759,14 @@ export function ShowLesson() {
           event.error,
           isAndroid() ? "(Android device)" : ""
         );
+
+        // Try AssemblyAI as fallback if Web Speech API fails
+        if (recordedAudioRef.currentBlob && !useAssemblyAI) {
+          console.log("Attempting AssemblyAI fallback...");
+          setUseAssemblyAI(true);
+          processWithAssemblyAI(recordedAudioRef.currentBlob);
+          return; // Don't show the error modal yet
+        }
       };
       recognitionRef.current.onend = () => {
         setIsRecording(false);
@@ -1662,6 +1847,9 @@ export function ShowLesson() {
             audioBlob.size
           } bytes${isAndroid() ? " (Android)" : ""}`
         );
+
+        // Store audioBlob for AssemblyAI processing if needed
+        recordedAudioRef.currentBlob = audioBlob;
 
         // Clean up stream and audio context
         if (streamRef.current) {
@@ -1850,13 +2038,67 @@ export function ShowLesson() {
     }
   };
 
+  // Process audio with AssemblyAI
+  const processWithAssemblyAI = async (audioBlob) => {
+    try {
+      setIsProcessingAssemblyAI(true);
+      setAssemblyAIProgress("جاري التحضير للمعالجة...");
+
+      const result = await assemblyAIService.transcribeAudio(
+        audioBlob,
+        (progress) => setAssemblyAIProgress(progress)
+      );
+
+      setIsProcessingAssemblyAI(false);
+      setAssemblyAIProgress("");
+
+      // Process the result same as Web Speech API
+      handleRecognitionResult(result.text, result.confidence);
+    } catch (error) {
+      console.error("AssemblyAI processing failed:", error);
+      setIsProcessingAssemblyAI(false);
+      setAssemblyAIProgress("");
+
+      // Show error to user
+      const idx = readingStateRef.current.currentIndex - 1;
+      const originalSentence = currentLesson.storyData.content[idx];
+
+      setRecordingResult({
+        success: false,
+        message: isAndroid()
+          ? "فشل في معالجة التسجيل. تحقق من اتصال الإنترنت وحاول مرة أخرى."
+          : "فشل في معالجة التسجيل. حاول مرة أخرى.",
+        userText: "",
+        originalText: originalSentence?.text || "",
+        audioUrl: recordedAudioRef.current,
+      });
+      setShowRecordingModal(true);
+      setIsWaitingForRecording(false);
+    }
+  };
+
   /* ------------------------------ Recording API ----------------------------- */
   const startRecording = useCallback(async () => {
+    // If Web Speech API is not available, use AssemblyAI directly
     if (!recognitionRef.current) {
-      const message = isAndroid()
-        ? "التسجيل الصوتي غير مدعوم في هذا المتصفح. جرب Chrome أو Firefox على Android"
-        : "التسجيل الصوتي غير مدعوم في متصفحك. جرب Chrome أو Edge";
-      alert(message);
+      console.log("Web Speech API not available, using AssemblyAI");
+      setUseAssemblyAI(true);
+
+      // Start audio recording for AssemblyAI
+      if (microphonePermission === "denied") {
+        const granted = await requestMicrophonePermission();
+        if (!granted) {
+          const message = isAndroid()
+            ? "تم رفض إذن الميكروفون. فعّل الإذن من إعدادات المتصفح أو إعدادات التطبيق."
+            : "تم رفض إذن الميكروفون. فعِّل الإذن من إعدادات المتصفح.";
+          alert(message);
+          return;
+        }
+      }
+
+      setRecordingResult(null);
+      setIsRecording(true);
+      startAudioRecording();
       return;
     }
 
@@ -1914,12 +2156,30 @@ export function ShowLesson() {
   const skipRecording = () => {
     setIsWaitingForRecording(false);
     setShowRecordingModal(false);
+    setIsProcessingAssemblyAI(false);
+    setAssemblyAIProgress("");
+    setUseAssemblyAI(false);
+
     // Clean up any recorded audio
     if (recordedAudioRef.current) {
       URL.revokeObjectURL(recordedAudioRef.current);
       recordedAudioRef.current = null;
     }
+    if (recordedAudioRef.currentBlob) {
+      recordedAudioRef.currentBlob = null;
+    }
     continueToNextSentence();
+  };
+
+  // Manual stop for AssemblyAI recording
+  const stopAssemblyAIRecording = () => {
+    setIsRecording(false);
+    stopAudioRecording();
+
+    // Process with AssemblyAI when recording stops
+    if (recordedAudioRef.currentBlob) {
+      processWithAssemblyAI(recordedAudioRef.currentBlob);
+    }
   };
 
   const continueToNextSentence = () => {
@@ -2339,6 +2599,13 @@ export function ShowLesson() {
         playAudioFile={playAudioFile}
         playRecordedAudio={playRecordedAudio}
         audioLevels={audioLevels}
+        // AssemblyAI props
+        useAssemblyAI={useAssemblyAI}
+        isProcessingAssemblyAI={isProcessingAssemblyAI}
+        assemblyAIProgress={assemblyAIProgress}
+        stopAssemblyAIRecording={stopAssemblyAIRecording}
+        setUseAssemblyAI={setUseAssemblyAI}
+        startRecording={startRecording}
       />
 
       {/* Mini Player */}
